@@ -21,6 +21,7 @@ email_pattern = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
 user_states = {}
 STATE_WAITING_FOR_EMAIL = 'waiting_for_email'
 STATE_WAITING_FOR_WALLET = 'waiting_for_wallet'
+STATE_WAITING_FOR_TWITTERUSERNAME = 'waiting_for_twitterusername'
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode=None)
 
@@ -34,27 +35,36 @@ def get_connection():
 def create_tables():
     conn, c = get_connection()
     c.execute('''CREATE TABLE IF NOT EXISTS referrals
-             (chat_id INTEGER PRIMARY KEY, referral_link TEXT, count INTEGER, upline_id INTEGER)''')
+             (chat_id INTEGER PRIMARY KEY, referral_link TEXT, count INTEGER, upline_id INTEGER, username TEXT)''')
     # Ensure the upline_id column exists (SQLite does not support ALTER TABLE to add a column if it exists, so we need to check manually)
     c.execute("PRAGMA table_info(referrals)")
     columns = [column[1] for column in c.fetchall()]
     if 'upline_id' not in columns:
         c.execute("ALTER TABLE referrals ADD COLUMN upline_id INTEGER")
+    if 'username' not in columns:
+        c.execute("ALTER TABLE referrals ADD COLUMN username INTEGER")
     c.execute('''CREATE TABLE IF NOT EXISTS bot_replies
                  (message_id INTEGER PRIMARY KEY, reply_text TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS bep20_addresses
                  (chat_id INTEGER PRIMARY KEY, bep20_address TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS email_address
                  (chat_id INTEGER PRIMARY KEY, email_address TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS user_info
+              (chat_id INTEGER PRIMARY KEY,username TEXT,twitterusername TEXT)''')
     conn.commit()
     conn.close()
 
 # Clear the database
 def clear_database():
     conn, c = get_connection()
+    c.execute('DELETE FROM email_address')
+    print(f"Deleted {c.rowcount} records from email_address")
     c.execute('DELETE FROM referrals')
-    c.execute('DELETE FROM bot_replies')
+    print(f"Deleted {c.rowcount} records from referrals")
     c.execute('DELETE FROM bep20_addresses')
+    print(f"Deleted {c.rowcount} records from bep20_addresses")
+    c.execute('DELETE FROM user_info')
+    print(f"Deleted {c.rowcount} records from user info")
     conn.commit()
     conn.close()
 
@@ -98,15 +108,89 @@ def generate_email_csv():
 
     return temp_file_path
 
-@bot.message_handler(commands=['clear_data'])
-def clear_data(message):
-    print(f"User ID: {message.from_user.id}")  # Debug statement to log the user ID
-    if message.from_user.id == 730149343:  # Replace with the actual Telegram account ID
-        clear_database()
-        bot.reply_to(message, "All data has been cleared.")
-    else:
-        bot.reply_to(message, "You do not have permission to use this command.")
-        
+# Function to generate a CSV file from referrals table
+def generate_referrals_csv():
+    # Create a temporary file to store the CSV data
+    temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, newline='', suffix='.csv')
+    temp_file_path = temp_file.name
+
+    # Retrieve data from referrals table
+    conn, c = get_connection()
+    c.execute("SELECT chat_id, referral_link, count, upline_id, username FROM referrals")
+    data = c.fetchall()
+    conn.close()
+
+    # Write data to the CSV file
+    with open(temp_file_path, 'w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(['Chat ID', 'Referral Link', 'Count', 'Upline ID', 'Username'])
+        writer.writerows(data)
+
+    return temp_file_path
+
+# Function to generate a CSV file from user_info table
+def generate_user_info_csv():
+    try:
+        # Create a temporary file to store the CSV data
+        temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, newline='', suffix='.csv')
+        temp_file_path = temp_file.name
+        temp_file.close()  # Close the file to allow other processes to access it
+
+        # Retrieve data from user_info table
+        conn, c = get_connection()
+        c.execute("SELECT chat_id, username, twitterusername FROM user_info")
+        data = c.fetchall()
+        conn.close()
+
+        # Write data to the CSV file
+        with open(temp_file_path, 'w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(['Chat ID', 'Username', 'Twitter Username'])
+            writer.writerows(data)
+
+        # Verify the file content (optional)
+        with open(temp_file_path, 'r') as file:
+            content = file.read()
+            print("Generated CSV content:\n", content)
+
+        return temp_file_path
+
+    except Exception as e:
+        print(f"An error occurred while generating the CSV file: {e}")
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+        return None
+
+# Retry decorator to handle database locking
+def retry_on_lock(func):
+    def wrapper(*args, **kwargs):
+        retries = 5
+        delay = 1
+        for i in range(retries):
+            try:
+                return func(*args, **kwargs)
+            except sqlite3.OperationalError as e:
+                if 'database is locked' in str(e):
+                    time.sleep(delay)
+                else:
+                    raise
+        raise Exception('Maximum retry attempts reached')
+    return wrapper
+
+@retry_on_lock
+def insert_bep20_address(chat_id, address):
+    conn, c = get_connection()
+    c.execute("INSERT INTO bep20_addresses (chat_id, bep20_address) VALUES (?, ?)", (chat_id, address))
+    conn.commit()
+    conn.close()
+
+@retry_on_lock
+def insert_email_address(chat_id, email):
+    conn, c = get_connection()
+    c.execute("INSERT INTO email_address (chat_id, email_address) VALUES (?, ?)", (chat_id, email))
+    conn.commit()
+    conn.close()
+
 # Handler to request wallet address
 @bot.callback_query_handler(func=lambda call: call.data == 'Wallet')
 def request_wallet_address(call):
@@ -121,11 +205,15 @@ def process_wallet_address(message):
     address = message.text
     if address_pattern.match(address):
         conn, c = get_connection()
-        c.execute("INSERT INTO bep20_addresses (chat_id, bep20_address) VALUES (?, ?)", (chat_id, address))
-        conn.commit()
+        c.execute("SELECT bep20_address FROM bep20_addresses WHERE chat_id = ?", (chat_id,))
+        waddress = c.fetchone()
         conn.close()
-        generate_bep20_csv()
-        bot.send_message(chat_id, "Your BEP20 address has been saved successfully.")
+        if waddress is not None:
+            bot.send_message(chat_id, "BEP20 address already exists.")
+        else:
+            insert_bep20_address(chat_id, address)
+            generate_bep20_csv()
+            bot.send_message(chat_id, "Your BEP20 address has been saved successfully.")
     else:
         bot.send_message(chat_id, "Invalid address format. Please send a valid BEP20 wallet address.")
     user_states.pop(chat_id, None)
@@ -144,94 +232,284 @@ def process_email_address(message):
     email = message.text
     if email_pattern.match(email):
         conn, c = get_connection()
-        c.execute("INSERT INTO email_address (chat_id, email_address) VALUES (?, ?)", (chat_id, email))
-        conn.commit()
+        c.execute("SELECT email_address FROM email_address WHERE chat_id = ?", (chat_id,))
+        emailaddress = c.fetchone()
         conn.close()
-        generate_email_csv()
-        bot.send_message(chat_id, "Your email address has been saved successfully.")
+        if emailaddress is not None:
+            bot.send_message(chat_id, "Email address already added.")
+        else:
+            insert_email_address(chat_id, email)
+            generate_email_csv()
+            bot.send_message(chat_id, "Your email address has been saved successfully.")
     else:
         bot.send_message(chat_id, "Invalid email format. Please send a valid email address.")
     user_states.pop(chat_id, None)
 
-@bot.message_handler(commands=['start','hello','help'])
-def start_command(message):
-    firstname = str(message.from_user.first_name)
-    keyboard = telebot.types.InlineKeyboardMarkup()
-    message_text = message.text
-    message_array = message_text.split()
+# Handler to request twitter username
+@bot.callback_query_handler(func=lambda call: call.data == 'TwitterUsername')
+def request_twitter_username(call):
+    chat_id = call.message.chat.id
+    user_states[chat_id] = STATE_WAITING_FOR_TWITTERUSERNAME
+    msg = bot.send_message(chat_id, "Please send your verified Twitter username e.g @username:")
+
+# Process twitter username
+@bot.message_handler(func=lambda message: user_states.get(message.chat.id) == STATE_WAITING_FOR_TWITTERUSERNAME)
+def process_twitter_username(message):
     chat_id = message.chat.id
+    twitter_username = message.text
     conn, c = get_connection()
-    
-    if len(message_array) > 1:
-        upline_id = message_array[1]
-        c.execute("SELECT * FROM referrals WHERE chat_id=?", (upline_id,))
-        upline_data = c.fetchone()
-        if upline_data:
-            referral_link = f"https://t.me/{bot.get_me().username}?start={chat_id}"
-            c.execute("INSERT INTO referrals (chat_id, referral_link, count, upline_id) VALUES (?, ?, ?, ?)", (chat_id, referral_link, 0, upline_id))
+    c.execute("SELECT chat_id FROM user_info WHERE chat_id = ?", (chat_id,))
+    uinfo = c.fetchone()
+    if uinfo is not None: 
+        c.execute("SELECT twitterusername FROM user_info WHERE chat_id = ?", (chat_id,))
+        twt_uname = c.fetchone()
+        if twt_uname is not None:
+            bot.send_message(chat_id, "Twitter username already added.")
+            user_states.pop(chat_id, None)
+        else:
+            c.execute("INSERT INTO user_info (chat_id, twitterusername) VALUES (?, ?)", (chat_id, twitter_username))
             conn.commit()
-            c.execute("UPDATE referrals SET count = count + 1 WHERE chat_id=?", (upline_id,))
-            conn.commit()
-    
-    c.execute("SELECT * FROM referrals WHERE chat_id=?", (chat_id,))
-    data = c.fetchone()
-    
-    if not data:
-        referral_link = f"https://t.me/{bot.get_me().username}?start={chat_id}"
-        c.execute("INSERT INTO referrals (chat_id, referral_link, count) VALUES (?, ?, ?)", (chat_id, referral_link, 0))
-        conn.commit()
-        
-        count = 0
-        
-        keyboard.add(
-            telebot.types.InlineKeyboardButton('About Fifareward', callback_data='details')
-        )
-        
-        text = str("Hello! " + firstname + "\n\n" +
-        "Welcome!, I'm FRD Airdrop Bot, follow the instructions below to join FRD waiting list.\n\n"+
-        f"Here is your referral link: {referral_link}.\n\n"+
-        f"Your have *{count}* referrals. \n\n"+
-        f"Keep sharing to earn a top spot in the aidrop waiting list"
-        )
-        bot.send_photo(
-            message.chat.id,
-            'https://www.fifareward.io/fifarewardlogo.png',
-            caption=text,
-            reply_markup=keyboard,
-            parse_mode="Markdown"
-        )
-            
+            conn.close()
+            bot.send_message(chat_id, "Your verified Twitter username has been saved successfully.")
+            user_states.pop(chat_id, None)
     else:
-        referral_link = data[1]
-        count = data[2]
-        keyboard.add(
-            telebot.types.InlineKeyboardButton('Check My Status', callback_data='status')
-        )
+        c.execute("INSERT INTO user_info (chat_id, twitterusername) VALUES (?, ?)", (chat_id, twitter_username))
+        conn.commit()
+        conn.close()
+        bot.send_message(chat_id, "Your verified Twitter username has been saved successfully.")
+        user_states.pop(chat_id, None)
         
-        text = str("Hello! " + firstname + "\n\n" +
-        " Welcome back\n"
-        )
-        bot.send_photo(
-            message.chat.id,
-            'https://www.fifareward.io/fifarewardlogo.png',
-            caption=text,
-            reply_markup=keyboard,
-            parse_mode="Markdown"
-        )
-
-
-@bot.message_handler(commands=['view_referrals'])
-def view_referrals(message):
-    chat_id = message.chat.id
+# Handler to request email address
+@bot.callback_query_handler(func=lambda call: call.data == 'MyReferrals')
+def request_email_address(call):
+    chat_id = call.message.chat.id
     conn, c = get_connection()
-    c.execute("SELECT chat_id FROM referrals WHERE upline_id=?", (chat_id,))
+    c.execute("SELECT chat_id, username FROM referrals WHERE upline_id=? AND chat_id != ?", (chat_id, chat_id))
     downlines = c.fetchall()
     conn.close()
 
     if downlines:
         text = "Your referrals:\n\n"
         for downline in downlines:
-            text += f"- {downline[0]}\n"
+            text += f"- Chat ID: {downline[0]}, Username: {downline[1] if downline[1] else 'N/A'}\n"
+    else:
+        text = "You don't have any referrals yet."
+
+    bot.send_message(chat_id, text, parse_mode="Markdown")
+        
+@bot.message_handler(commands=['download_csv'])
+def send_csv_options(message):
+    chat_id = message.chat.id
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(telebot.types.InlineKeyboardButton("Download BEP20 Addresses CSV", callback_data="download_bep20_csv"))
+    markup.add(telebot.types.InlineKeyboardButton("Download Email Addresses CSV", callback_data="download_email_csv"))
+    markup.add(telebot.types.InlineKeyboardButton("Download Referrals CSV", callback_data="download_referrals_csv"))
+    markup.add(telebot.types.InlineKeyboardButton("Download User Info CSV", callback_data="download_user_info_csv"))
+    bot.send_message(chat_id, "Please select the CSV file you want to download:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('download_'))
+def handle_download_csv(call):
+    chat_id = call.message.chat.id
+    file_type = call.data.split('_')[1]
+    
+    if file_type == "bep20":
+        file_path = generate_bep20_csv()
+        file_name = "bep20_addresses.csv"
+    elif file_type == "email":
+        file_path = generate_email_csv()
+        file_name = "email_addresses.csv"
+    elif file_type == "referrals":
+        file_path = generate_referrals_csv()
+        file_name = "referrals.csv"
+    elif file_type == "user_info":
+        file_path = generate_user_info_csv()
+        file_name = "user_info.csv"
+    else:
+        bot.send_message(chat_id, "Invalid file type.")
+        return
+    
+    with open(file_path, 'rb') as file:
+        bot.send_document(chat_id, file, caption=f"{file_name}")
+    
+    os.remove(file_path)  # Clean up the temporary file
+    
+@bot.message_handler(commands=['clear_data'])
+def clear_data(message):
+    print(f"User ID: {message.from_user.id}")  # Debug statement to log the user ID
+    if message.from_user.id == 730149343:  # Replace with the actual Telegram account ID
+        clear_database()
+        bot.reply_to(message, "All data has been cleared.")
+    else:
+        bot.reply_to(message, "You do not have permission to use this command.")
+
+@bot.message_handler(commands=['start', 'hello', 'help'])
+def start_command(message):
+    firstname = str(message.from_user.first_name)
+    keyboard = telebot.types.InlineKeyboardMarkup()
+    message_text = message.text
+    username = message.from_user.username  # Get the username
+    message_array = message_text.split()
+    chat_id = message.chat.id
+    conn, c = get_connection()
+    print("mesg text",message_text)
+    print("msg arr",message_array)
+    print("msg arr",len(message_array))
+    if len(message_array) > 1:
+        upline_id = message_array[1]
+        print("uplin id",upline_id)
+        c.execute("SELECT * FROM referrals WHERE chat_id=?", (upline_id,))
+        upline_data = c.fetchone()
+        print("upl data",upline_data)
+        if upline_data:
+            referral_link = f"https://t.me/{bot.get_me().username}?start={chat_id}"
+            # Check if the chat_id already exists
+            c.execute("SELECT * FROM referrals WHERE chat_id=?", (chat_id,))
+            data = c.fetchone()
+            if not data:
+                c.execute("SELECT chat_id FROM user_info WHERE chat_id = ?", (chat_id,))
+                uinfo = c.fetchone()
+                if uinfo is not None: 
+                    c.execute("SELECT username FROM user_info WHERE chat_id = ?", (chat_id,))
+                    twt_uname = c.fetchone()
+                    if twt_uname is None:
+                        c.execute("INSERT INTO user_info (chat_id, username) VALUES (?, ?)", (chat_id, username))
+                        conn.commit()
+                else:
+                    c.execute("INSERT INTO user_info (chat_id, username) VALUES (?, ?)", (chat_id, username))
+                    conn.commit()
+                    
+                c.execute("INSERT INTO referrals (chat_id, referral_link, count, upline_id, username) VALUES (?, ?, ?, ?, ?)",
+                          (chat_id, referral_link, 0, upline_id, username))
+                conn.commit()
+                c.execute("UPDATE referrals SET count = count + 1 WHERE chat_id=?", (upline_id,))
+                conn.commit()
+                
+                c.execute("SELECT * FROM referrals WHERE chat_id=?", (chat_id,))
+                userdata = c.fetchone()
+                if userdata is not None:
+                    count = userdata[2]  # Assuming the count column is at index 2 in the tuple
+                    # Use the count value as needed
+                else:
+                    count = 0
+                    
+                keyboard.add(
+                    telebot.types.InlineKeyboardButton('About Fifareward', callback_data='details')
+                )
+                text = str("Hello! " + firstname + "\n\n" +
+                        "Welcome!, I'm FRD Airdrop Bot, follow the instructions below to join FRD waiting list.\n\n" +
+                        f"Here is your referral link: {referral_link}.\n\n" +
+                        f"Your have *{count}* referrals. \n\n" +
+                        f"Keep sharing to earn a top spot in the aidrop waiting list"
+                        )
+                bot.send_photo(
+                    message.chat.id,
+                    'https://www.fifareward.io/fifarewardlogo.png',
+                    caption=text,
+                    reply_markup=keyboard,
+                    parse_mode="Markdown"
+                )
+                    
+            else:
+                # If the chat_id exists, update the existing record
+                c.execute("UPDATE referrals SET referral_link = ?, upline_id = ? WHERE chat_id = ?",
+                          (referral_link, upline_id, chat_id))
+                conn.commit()
+                keyboard.add(
+                    telebot.types.InlineKeyboardButton('Check My Status', callback_data='status')
+                )
+
+                text = str("Hello! " + firstname + "\n\n" +
+                        "Welcome back\n"
+                        )
+                bot.send_photo(
+                    message.chat.id,
+                    'https://www.fifareward.io/fifarewardlogo.png',
+                    caption=text,
+                    reply_markup=keyboard,
+                    parse_mode="Markdown"
+                )
+
+        else:
+            referral_link = f"https://t.me/{bot.get_me().username}?start={chat_id}"
+            # Check if the chat_id already exists
+            c.execute("SELECT * FROM referrals WHERE chat_id=?", (chat_id,))
+            data = c.fetchone()
+            
+            if not data:
+                c.execute("INSERT INTO referrals (chat_id, referral_link, count, upline_id, username) VALUES (?, ?, ?, ?, ?)",
+                          (chat_id, referral_link, 0, upline_id, username))
+                conn.commit()
+                c.execute("UPDATE referrals SET count = count + 1 WHERE chat_id=?", (upline_id,))
+                conn.commit()
+                c.execute("SELECT * FROM referrals WHERE chat_id=?", (chat_id,))
+                userdata = c.fetchone()
+                
+                if userdata is not None:
+                    count = userdata[2]  # Assuming the count column is at index 2 in the tuple
+                    # Use the count value as needed
+                else:
+                    count = 0
+                    
+                keyboard.add(
+                    telebot.types.InlineKeyboardButton('About Fifareward', callback_data='details')
+                )
+                text = str("Hello! " + firstname + "\n\n" +
+                        "Welcome!, I'm FRD Airdrop Bot, follow the instructions below to join FRD waiting list.\n\n" +
+                        f"Here is your referral link: {referral_link}.\n\n" +
+                        f"Your have *{count}* referrals. \n\n" +
+                        f"Keep sharing to earn a top spot in the aidrop waiting list"
+                        )
+                bot.send_photo(
+                    message.chat.id,
+                    'https://www.fifareward.io/fifarewardlogo.png',
+                    caption=text,
+                    reply_markup=keyboard,
+                    parse_mode="Markdown"
+                )
+                
+            else:
+                # If the chat_id exists, update the existing record
+                c.execute("UPDATE referrals SET referral_link = ?, upline_id = ? WHERE chat_id = ?",
+                          (referral_link, upline_id, chat_id))
+                conn.commit()
+                keyboard.add(
+                    telebot.types.InlineKeyboardButton('Check My Status', callback_data='status')
+                )
+
+                text = str("Hello! " + firstname + "\n\n" +
+                        "Welcome back\n"
+                        )
+                bot.send_photo(
+                    message.chat.id,
+                    'https://www.fifareward.io/fifarewardlogo.png',
+                    caption=text,
+                    reply_markup=keyboard,
+                    parse_mode="Markdown"
+                )
+    else:
+        text = str("Hi! " + message.from_user.first_name + "\n\n" +
+                "You must join using someone's referral link to participate in Fifareward airdrop.")
+        
+        bot.send_photo(
+            message.chat.id,
+            'https://www.fifareward.io/fifarewardlogo.png',
+            caption=text,
+            parse_mode="Markdown"
+        )
+                
+
+@bot.message_handler(commands=['view_referrals'])
+def view_referrals(message):
+    chat_id = message.chat.id
+    conn, c = get_connection()
+    c.execute("SELECT chat_id, username FROM referrals WHERE upline_id=? AND chat_id != ?", (chat_id, chat_id))
+    downlines = c.fetchall()
+    conn.close()
+
+    if downlines:
+        text = "Your referrals:\n\n"
+        for downline in downlines:
+            text += f"- Chat ID: {downline[0]}, Username: {downline[1] if downline[1] else 'N/A'}\n"
     else:
         text = "You don't have any referrals yet."
 
@@ -240,21 +518,21 @@ def view_referrals(message):
 @bot.message_handler(commands=['view_all_referrals'])
 def view_all_referrals(message):
     conn, c = get_connection()
-    c.execute("SELECT chat_id, upline_id FROM referrals")
+    c.execute("SELECT chat_id, upline_id, username FROM referrals")
     all_referrals = c.fetchall()
     conn.close()
 
     if all_referrals:
         referrals_map = {}
         for referral in all_referrals:
-            chat_id, upline_id = referral
+            chat_id, upline_id, username = referral
             if upline_id not in referrals_map:
                 referrals_map[upline_id] = []
-            referrals_map[upline_id].append(chat_id)
+            referrals_map[upline_id].append((chat_id, username))
 
         text = "All referrals:\n\n"
         for upline_id, downlines in referrals_map.items():
-            downlines_text = ", ".join(str(downline) for downline in downlines)
+            downlines_text = ", ".join(f"{downline[0]} ({downline[1] if downline[1] else 'N/A'})" for downline in downlines)
             text += f"Upline {upline_id}:\n"
             text += f"```\n"
             text += f"{downlines_text}\n"
@@ -263,62 +541,6 @@ def view_all_referrals(message):
         text = "No referrals found."
 
     bot.send_message(message.chat.id, text, parse_mode="Markdown")
-
-
-# @bot.message_handler(commands=['download_csv'])
-# def download_csv():
-#     try:
-#         # Create a temporary file to store the CSV data
-#         temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, newline='', suffix='.csv')
-#         temp_file_path = temp_file.name
-
-#         # Retrieve data from bep20_addresses table
-#         conn, c = get_connection()
-#         c.execute("SELECT chat_id, bep20_address FROM bep20_addresses")
-#         data = c.fetchall()
-#         conn.close()
-
-#         # Write data to the CSV file
-#         with open(temp_file_path, 'w', newline='') as file:
-#             writer = csv.writer(file)
-#             writer.writerow(['Chat ID', 'BEP20 Address'])
-#             writer.writerows(data)
-
-#         return temp_file_path
-#     except Exception as e:
-#         print(f"An error occurred while generating the CSV file: {e}")
-#         return None
-
-@bot.message_handler(commands=['download_csv'])
-def download_csv(message):
-    if message.from_user.id == 730149343:  # Replace with the actual Telegram account ID
-        keyboard = telebot.types.InlineKeyboardMarkup()
-        keyboard.row(
-            telebot.types.InlineKeyboardButton('BEP20 Addresses', callback_data='download_bep20'),
-            telebot.types.InlineKeyboardButton('Email Addresses', callback_data='download_email')
-        )
-        bot.send_message(message.chat.id, "Select which CSV file to download:", reply_markup=keyboard)
-    else:
-        bot.reply_to(message, "You do not have permission to use this command.")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('download_'))
-def handle_download_callback(call):
-    csv_type = call.data.split('_')[1]
-    if csv_type == 'bep20':
-        file_path = generate_bep20_csv()
-        if file_path:
-            bot.send_document(call.message.chat.id, open(file_path, 'rb'))
-            bot.answer_callback_query(call.id, "BEP20 address CSV file has been sent.")
-        else:
-            bot.answer_callback_query(call.id, "Failed to generate the BEP20 address CSV file.")
-    elif csv_type == 'email':
-        file_path = generate_email_csv()
-        if file_path:
-            bot.send_document(call.message.chat.id, open(file_path, 'rb'))
-            bot.answer_callback_query(call.id, "Email address CSV file has been sent.")
-        else:
-            bot.answer_callback_query(call.id, "Failed to generate the email address CSV file.")
-
 
 @bot.callback_query_handler(func=lambda call: True)
 def iq_callback(call):
@@ -332,9 +554,9 @@ def iq_callback(call):
         )
         text = str("Fifareward is a layer 2 blockchain on BSC network, it is the first decentralized AI revolutionary betting Dapp on the blockchain. \n\n" +
         "Utilities include: \n\n" +
-        "1) Betting\n" +
-        "2) Staking \n" +
-        "3) Farming \n" + 
+        "1) Soccer Betting\n" +
+        "2) Staking Protocol\n" +
+        "3) Farming Protocol\n" + 
         "4) AI Powered Games\n" +
         "5) NFT Minting Engine And Market Place \n\n" +
         "==>) More in our road map \n\n" 
@@ -354,15 +576,37 @@ def iq_callback(call):
         discord = f"https://discord.com/invite/DC5Ta8bb"
         telegramgroup = f"https://t.me/FifarewardLabs"
         twitter = f"https://twitter.com/@FRD_Labs"
-        metamask = f"https://metamask.io"
-        trustwallet = f"https://trustwallet.com"
         
-        text = f"To join the Fifareward airdrop campaign, you must do the following tasks. \n\n" + \
+        text = f"To join the Fifareward airdrop waiting list, you must do the following tasks. \n\n" + \
        "Join our;\n\n" + \
        f"1) <a href=\"{twitter}\">Twitter</a> \n" + \
        f"2) <a href=\"{discord}\">Discord</a> \n" + \
        f"3) <a href=\"{telegramgroup}\">Telegram</a> \n" + \
-       f"4) Connect to our dapp using <a href=\"{trustwallet}\"> trust wallet </a> or <a href=\"{metamask}\"> metmask</a>, in your trust wallet app, enter https://www.fifareward.io in the browser address bar and connect to fifareward dapp. \n\n" + \
+       f"4) Connect to our dapp using <a href=\"https://link.trustwallet.com/open_url?&url=https://www.fifareward.io\"> trust wallet </a> or <a href=\"https://metamask.app.link/dapp/www.fifareward.io\"> metmask</a>, in your wallet, enter https://www.fifareward.io in the browser address bar and connect to fifareward dapp. \n\n" + \
+       "5) Like and retweet our tweets \n\n"
+        bot.answer_callback_query(call.id)
+        bot.send_chat_action(call.message.chat.id, 'typing')
+        bot.send_message(
+            call.message.chat.id,
+            text,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+        
+    if data == 'BackToTasks':
+        keyboard.add(
+            telebot.types.InlineKeyboardButton("Have Completed Tasks", callback_data='Done')
+        )
+        discord = f"https://discord.com/invite/DC5Ta8bb"
+        telegramgroup = f"https://t.me/FifarewardLabs"
+        twitter = f"https://twitter.com/@FRD_Labs"
+        
+        text = f"To join the Fifareward airdrop waiting list, you must do the following tasks. \n\n" + \
+       "Join our;\n\n" + \
+       f"1) <a href=\"{twitter}\">Twitter</a> \n" + \
+       f"2) <a href=\"{discord}\">Discord</a> \n" + \
+       f"3) <a href=\"{telegramgroup}\">Telegram</a> \n" + \
+       f"4) Connect to our dapp using <a href=\"https://link.trustwallet.com/open_url?&url=https://www.fifareward.io\"> trust wallet </a> or <a href=\"https://metamask.app.link/dapp/www.fifareward.io\"> metmask</a>, in your wallet, enter https://www.fifareward.io in the browser address bar and connect to fifareward dapp. \n\n" + \
        "5) Like and retweet our tweets \n\n"
         bot.answer_callback_query(call.id)
         bot.send_chat_action(call.message.chat.id, 'typing')
@@ -375,13 +619,16 @@ def iq_callback(call):
         
     if data == 'Done':
         keyboard.add(
-            telebot.types.InlineKeyboardButton("Enter Email Address", callback_data='Email'),
-            telebot.types.InlineKeyboardButton("Enter Wallet Address", callback_data='Wallet'),
-            telebot.types.InlineKeyboardButton("Next", callback_data='Continue')
+            telebot.types.InlineKeyboardButton("Submit Email Address", callback_data='Email'),
+            telebot.types.InlineKeyboardButton("Submit Wallet Address", callback_data='Wallet')
         )
-        text = str("Congratulations!, we will verify that you have completed all the tasks, please submit your wallet and email address for the waiting list. \n\n" + \
-                   "To submit your email, type your email and click Enter Email Address button, do same for wallet address \n"
-                   "Click on Continue after you've submitted your wallet and email addresses")
+        keyboard.add(
+            telebot.types.InlineKeyboardButton("Submit Twitter Username", callback_data='TwitterUsername')
+        )
+        keyboard.add(
+            telebot.types.InlineKeyboardButton("Have Submitted All Details", callback_data='Continue')
+        )
+        text = str("Congratulations!, we will verify that you have completed all the tasks, please submit your wallet address, verified twitter username and email address for the waiting list. \n\n")
         bot.send_chat_action(call.message.chat.id, 'typing')
         bot.send_message(
             call.message.chat.id,
@@ -393,13 +640,19 @@ def iq_callback(call):
     if data == 'status':
         conn, c = get_connection()
         chat_id = call.message.chat.id
-        c.execute("SELECT * FROM referrals WHERE chat_id=?", (chat_id,))
+        print("chat id--",chat_id)
+        c.execute("SELECT * FROM referrals WHERE chat_id =?", (chat_id,))
         data = c.fetchone()
-        conn.close()  # Ensure the connection is closed
-
-        if data:
+        print("data o",data)
+        if data is not None:
+            # c.execute("SELECT * FROM referrals WHERE upline_id=?", (chat_id,))
+            # data_ = c.fetchone()
+            # print("pop",data_)
+            # conn.close()  # Ensure the connection is closed
             count = data[2]
             referral_link = data[1]
+            keyboard = telebot.types.InlineKeyboardMarkup()
+            keyboard.add(telebot.types.InlineKeyboardButton("Back To Tasks", callback_data='BackToTasks'))
             text = (
                 f"You have *{count}* referrals. \n\n"
                 f"Here is your referral link: {referral_link}.\n\n"
@@ -409,6 +662,7 @@ def iq_callback(call):
             bot.send_message(
                 call.message.chat.id,
                 text,
+                reply_markup=keyboard,
                 parse_mode="Markdown"  # Ensure proper Markdown parsing
             )
         else:
@@ -461,31 +715,42 @@ def iq_callback(call):
         conn, c = get_connection()
         chat_id = call.message.chat.id
         
+        keyboard.add(
+            telebot.types.InlineKeyboardButton("My Referrals", callback_data='MyReferrals'),
+            telebot.types.InlineKeyboardButton("Back To Tasks", callback_data='BackToTasks')
+        )
+        
+        
         c.execute("SELECT * FROM referrals WHERE chat_id=?", (chat_id,))
-        data_ = c.fetchone()
-        count = data_[2]
-        referral_link = data_[1]
-        text = (
-            f"You have *{count}* referrals. \n\n"
-            f"Here is your referral link: {referral_link}.\n\n"
-            f"Keep sharing to earn a top spot in FRD waiting list"
-        )
-        bot.send_chat_action(call.message.chat.id, 'typing')
-        bot.send_message(
-            call.message.chat.id,
-            text,
-            parse_mode="Markdown"  # Ensure proper Markdown parsing
-        )
+        data = c.fetchone()
+        if data is not None:
+            # c.execute("SELECT * FROM referrals WHERE upline_id=? AND chat_id != upline_id", (chat_id,))
+            # data_ = c.fetchone()
+            # if data_ is not None:
+            count = data[2]
+            referral_link = data[1]
+            text = (
+                f"You have *{count}* referrals. \n\n"
+                f"Here is your referral link: {referral_link}.\n\n"
+                f"Keep sharing to earn a top spot in FRD waiting list"
+            )
+            bot.send_chat_action(call.message.chat.id, 'typing')
+            bot.send_message(
+                call.message.chat.id,
+                text,
+                reply_markup=keyboard,
+                parse_mode="Markdown"  # Ensure proper Markdown parsing
+            )
+            
         conn.close()
         
 
 @bot.message_handler(func=lambda message: True)
 def echo_all(message):
     conn, c = get_connection()
-    keyboard = telebot.types.InlineKeyboardMarkup()
     chat_id = message.chat.id
     
-    c.execute("SELECT * FROM referrals WHERE chat_id=?", (chat_id,))
+    c.execute("SELECT * FROM referrals WHERE chat_d=?", (chat_id,))
     data = c.fetchone()
     
     if not data :
