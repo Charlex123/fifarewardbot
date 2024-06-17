@@ -603,7 +603,7 @@ def iq_callback(call):
         keyboard.add(
             telebot.types.InlineKeyboardButton("Have Completed Tasks", callback_data='Done')
         )
-        discord = f"https://discord.com/invite/DC5Ta8bb"
+        discord = f"https://discord.gg/aQ7bjShzHy"
         telegramgroup = f"https://t.me/FifarewardLabs"
         twitter = f"https://twitter.com/@FRD_Labs"
         
