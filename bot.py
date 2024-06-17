@@ -52,7 +52,12 @@ def create_tables():
     c.execute('''CREATE TABLE IF NOT EXISTS twitterusernames
               (chat_id INTEGER PRIMARY KEY, twitter_username TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS telegramusernames
-              (chat_id INTEGER PRIMARY KEY, telegram_username TEXT)''')
+              (chat_id INTEGER PRIMARY KEY, telegram_username, firstname TEXT)''')
+    c.execute("PRAGMA table_info(telegramusernames)")
+    columns = [column[1] for column in c.fetchall()]
+    if 'firstname' not in columns:
+        c.execute("ALTER TABLE telegram_username ADD COLUMN firstname INTEGER")
+        
     conn.commit()
     conn.close()
 
@@ -169,13 +174,13 @@ def generate_telegramusernames_csv():
         temp_file.close()
 
         conn, c = get_connection()
-        c.execute("SELECT chat_id, telegram_username FROM telegramusernames")
+        c.execute("SELECT chat_id, telegram_username, firstname FROM telegramusernames")
         data = c.fetchall()
         conn.close()
 
         with open(temp_file_path, 'w', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow(['Chat ID', 'Telegram Username'])
+            writer.writerow(['Chat ID', 'Telegram Username', 'Telegram Firstname'])
             writer.writerows(data)
 
         with open(temp_file_path, 'r') as file:
@@ -402,10 +407,10 @@ def start_command(message):
                     c.execute("SELECT telegram_username FROM telegramusernames WHERE chat_id = ?", (chat_id,))
                     twt_uname = c.fetchone()
                     if twt_uname is None:
-                        c.execute("INSERT INTO telegramusernames (chat_id, telegram_username) VALUES (?, ?)", (chat_id, username))
+                        c.execute("INSERT INTO telegramusernames (chat_id, telegram_username, firstname) VALUES (?, ?)", (chat_id, username, firstname))
                         conn.commit()
                 else:
-                    c.execute("INSERT INTO telegramusernames (chat_id, telegram_username) VALUES (?, ?)", (chat_id, username))
+                    c.execute("INSERT INTO telegramusernames (chat_id, telegram_username, firstname) VALUES (?, ?)", (chat_id, username, firstname))
                     conn.commit()
                     
                 c.execute("INSERT INTO referrals (chat_id, referral_link, count, upline_id, username) VALUES (?, ?, ?, ?, ?)",
