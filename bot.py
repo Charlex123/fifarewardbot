@@ -49,8 +49,10 @@ def create_tables():
                  (chat_id INTEGER PRIMARY KEY, bep20_address TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS email_address
                  (chat_id INTEGER PRIMARY KEY, email_address TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS user_info
-              (chat_id INTEGER PRIMARY KEY,username TEXT,twitterusername TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS twitterusernames
+              (chat_id INTEGER PRIMARY KEY, twitter_username TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS telegramusernames
+              (chat_id INTEGER PRIMARY KEY, telegram_username TEXT)''')
     conn.commit()
     conn.close()
 
@@ -63,8 +65,10 @@ def clear_database():
     print(f"Deleted {c.rowcount} records from referrals")
     c.execute('DELETE FROM bep20_addresses')
     print(f"Deleted {c.rowcount} records from bep20_addresses")
-    c.execute('DELETE FROM user_info')
-    print(f"Deleted {c.rowcount} records from user info")
+    c.execute('DELETE FROM telegramusernames')
+    print(f"Deleted {c.rowcount} records from telegramusernames")
+    c.execute('DELETE FROM twitterusernames')
+    print(f"Deleted {c.rowcount} records from twitterusernames")
     conn.commit()
     conn.close()
 
@@ -128,30 +132,55 @@ def generate_referrals_csv():
 
     return temp_file_path
 
-# Function to generate a CSV file from user_info table
-def generate_user_info_csv():
+# Function to generate a CSV file from twitterusername table
+def generate_twitterusernames_csv():
     try:
-        # Create a temporary file to store the CSV data
         temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, newline='', suffix='.csv')
         temp_file_path = temp_file.name
-        temp_file.close()  # Close the file to allow other processes to access it
+        temp_file.close()
 
-        # Retrieve data from user_info table
         conn, c = get_connection()
-        c.execute("SELECT chat_id, username, twitterusername FROM user_info")
+        c.execute("SELECT chat_id, twitter_username FROM twitterusernames")
         data = c.fetchall()
         conn.close()
 
-        # Write data to the CSV file
         with open(temp_file_path, 'w', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow(['Chat ID', 'Username', 'Twitter Username'])
+            writer.writerow(['Chat ID', 'Twitter Username'])
             writer.writerows(data)
 
-        # Verify the file content (optional)
         with open(temp_file_path, 'r') as file:
             content = file.read()
-            print("Generated CSV content:\n", content)
+            print("Generated CSV content (Twitter Username):\n", content)
+
+        return temp_file_path
+
+    except Exception as e:
+        print(f"An error occurred while generating the CSV file: {e}")
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+        return None
+
+# Function to generate a CSV file from telegramusername table
+def generate_telegramusernames_csv():
+    try:
+        temp_file = tempfile.NamedTemporaryFile(mode='w', delete=False, newline='', suffix='.csv')
+        temp_file_path = temp_file.name
+        temp_file.close()
+
+        conn, c = get_connection()
+        c.execute("SELECT chat_id, telegram_username FROM telegramusernames")
+        data = c.fetchall()
+        conn.close()
+
+        with open(temp_file_path, 'w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(['Chat ID', 'Telegram Username'])
+            writer.writerows(data)
+
+        with open(temp_file_path, 'r') as file:
+            content = file.read()
+            print("Generated CSV content (Telegram Username):\n", content)
 
         return temp_file_path
 
@@ -258,22 +287,22 @@ def process_twitter_username(message):
     chat_id = message.chat.id
     twitter_username = message.text
     conn, c = get_connection()
-    c.execute("SELECT chat_id FROM user_info WHERE chat_id = ?", (chat_id,))
+    c.execute("SELECT chat_id FROM twitterusernames WHERE chat_id = ?", (chat_id,))
     uinfo = c.fetchone()
     if uinfo is not None: 
-        c.execute("SELECT twitterusername FROM user_info WHERE chat_id = ?", (chat_id,))
+        c.execute("SELECT twitter_username FROM twitterusernames WHERE chat_id = ?", (chat_id,))
         twt_uname = c.fetchone()
         if twt_uname is not None:
             bot.send_message(chat_id, "Twitter username already added.")
             user_states.pop(chat_id, None)
         else:
-            c.execute("INSERT INTO user_info (chat_id, twitterusername) VALUES (?, ?)", (chat_id, twitter_username))
+            c.execute("INSERT INTO twitterusernames (chat_id, twitter_username) VALUES (?, ?)", (chat_id, twitter_username))
             conn.commit()
             conn.close()
             bot.send_message(chat_id, "Your verified Twitter username has been saved successfully.")
             user_states.pop(chat_id, None)
     else:
-        c.execute("INSERT INTO user_info (chat_id, twitterusername) VALUES (?, ?)", (chat_id, twitter_username))
+        c.execute("INSERT INTO twitterusernames (chat_id, twitter_username) VALUES (?, ?)", (chat_id, twitter_username))
         conn.commit()
         conn.close()
         bot.send_message(chat_id, "Your verified Twitter username has been saved successfully.")
@@ -304,7 +333,8 @@ def send_csv_options(message):
     markup.add(telebot.types.InlineKeyboardButton("Download BEP20 Addresses CSV", callback_data="download_bep20_csv"))
     markup.add(telebot.types.InlineKeyboardButton("Download Email Addresses CSV", callback_data="download_email_csv"))
     markup.add(telebot.types.InlineKeyboardButton("Download Referrals CSV", callback_data="download_referrals_csv"))
-    markup.add(telebot.types.InlineKeyboardButton("Download User Info CSV", callback_data="download_user_info_csv"))
+    markup.add(telebot.types.InlineKeyboardButton("Download Twitter Usernames", callback_data="download_twitterusernames_csv"))
+    markup.add(telebot.types.InlineKeyboardButton("Download Telegram Usernames", callback_data="download_telegramusernames_csv"))
     bot.send_message(chat_id, "Please select the CSV file you want to download:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('download_'))
@@ -321,9 +351,12 @@ def handle_download_csv(call):
     elif file_type == "referrals":
         file_path = generate_referrals_csv()
         file_name = "referrals.csv"
-    elif file_type == "user_info":
-        file_path = generate_user_info_csv()
-        file_name = "user_info.csv"
+    elif file_type == "twitterusernames":
+        file_path = generate_twitterusernames_csv()
+        file_name = "twitterusernames.csv"
+    elif file_type == "telegramusernames":
+        file_path = generate_telegramusernames_csv()
+        file_name = "telegramusernames.csv"
     else:
         bot.send_message(chat_id, "Invalid file type.")
         return
@@ -366,16 +399,16 @@ def start_command(message):
             c.execute("SELECT * FROM referrals WHERE chat_id=?", (chat_id,))
             data = c.fetchone()
             if not data:
-                c.execute("SELECT chat_id FROM user_info WHERE chat_id = ?", (chat_id,))
+                c.execute("SELECT chat_id FROM telegramusernames WHERE chat_id = ?", (chat_id,))
                 uinfo = c.fetchone()
                 if uinfo is not None: 
-                    c.execute("SELECT username FROM user_info WHERE chat_id = ?", (chat_id,))
+                    c.execute("SELECT telegram_username FROM telegramusernames WHERE chat_id = ?", (chat_id,))
                     twt_uname = c.fetchone()
                     if twt_uname is None:
-                        c.execute("INSERT INTO user_info (chat_id, username) VALUES (?, ?)", (chat_id, username))
+                        c.execute("INSERT INTO telegramusernames (chat_id, telegram_username) VALUES (?, ?)", (chat_id, username))
                         conn.commit()
                 else:
-                    c.execute("INSERT INTO user_info (chat_id, username) VALUES (?, ?)", (chat_id, username))
+                    c.execute("INSERT INTO telegramusernames (chat_id, telegram_username) VALUES (?, ?)", (chat_id, username))
                     conn.commit()
                     
                 c.execute("INSERT INTO referrals (chat_id, referral_link, count, upline_id, username) VALUES (?, ?, ?, ?, ?)",
