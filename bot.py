@@ -608,12 +608,12 @@ def iq_callback(call):
         twitter = f"https://twitter.com/@FRD_Labs"
         
         text = f"To join the Fifareward airdrop waiting list, you must do the following tasks. \n\n" + \
-       "Join our;\n\n" + \
-       f"1) <a href=\"{twitter}\">Twitter</a> \n" + \
-       f"2) <a href=\"{discord}\">Discord</a> \n" + \
-       f"3) <a href=\"{telegramgroup}\">Telegram</a> \n" + \
-       f"4) Connect to our dapp using <a href=\"https://link.trustwallet.com/open_url?&url=https://www.fifareward.io\"> trust wallet </a> or <a href=\"https://metamask.app.link/dapp/www.fifareward.io\"> metmask</a>, in your wallet, enter https://www.fifareward.io in the browser address bar and connect to fifareward dapp. \n\n" + \
-       "5) Like and retweet our tweets \n\n"
+        "Join our;\n\n" + \
+        f"1) <a href=\"{telegramgroup}\">Telegram</a> \n" + \
+        f"2) <a href=\"{discord}\">Discord</a> \n" + \
+        f"3) <a href=\"{twitter}\">Twitter</a> \n" + \
+        f"4) Like and retweet our tweets \n" + \
+        f"5) Connect to our dapp using <a href=\"https://link.trustwallet.com/open_url?&url=https://www.fifareward.io\"> trust wallet </a> or <a href=\"https://metamask.app.link/dapp/www.fifareward.io\"> metmask</a>, in your wallet, enter https://www.fifareward.io in the browser address bar and connect to fifareward dapp. \n\n" + \
         bot.answer_callback_query(call.id)
         bot.send_chat_action(call.message.chat.id, 'typing')
         bot.send_message(
