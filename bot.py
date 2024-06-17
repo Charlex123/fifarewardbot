@@ -384,9 +384,6 @@ def start_command(message):
     message_array = message_text.split()
     chat_id = message.chat.id
     conn, c = get_connection()
-    print("mesg text",message_text)
-    print("msg arr",message_array)
-    print("msg arr",len(message_array))
     if len(message_array) > 1:
         upline_id = message_array[1]
         print("uplin id",upline_id)
