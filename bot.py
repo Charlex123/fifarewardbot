@@ -7,6 +7,7 @@ import telebot
 import sqlite3
 import tempfile
 import re
+import html
 import csv
 import requests
 import signal
@@ -56,7 +57,7 @@ def create_tables():
     c.execute("PRAGMA table_info(telegramusernames)")
     columns = [column[1] for column in c.fetchall()]
     if 'firstname' not in columns:
-        c.execute("ALTER TABLE telegram_username ADD COLUMN firstname INTEGER")
+        c.execute("ALTER TABLE telegramusernames ADD COLUMN firstname INTEGER")
         
     conn.commit()
     conn.close()
@@ -318,7 +319,7 @@ def process_twitter_username(message):
 def request_email_address(call):
     chat_id = call.message.chat.id
     conn, c = get_connection()
-    c.execute("SELECT chat_id, username FROM referrals WHERE upline_id=? AND chat_id != ?", (chat_id, chat_id))
+    c.execute("SELECT chat_id, username FROM referrals WHERE upline_id=?", (chat_id,))
     downlines = c.fetchall()
     conn.close()
 
@@ -537,44 +538,45 @@ def start_command(message):
 def view_referrals(message):
     chat_id = message.chat.id
     conn, c = get_connection()
-    c.execute("SELECT chat_id, username FROM referrals WHERE upline_id=? AND chat_id != ?", (chat_id, chat_id))
+    c.execute("SELECT chat_id, username FROM referrals WHERE upline_id=?", (chat_id,))
+    downlines = c.fetchall()
+    conn.close()
+    
+    if downlines:
+        table = PrettyTable()
+        table.field_names = ["Chat ID", "Username"]
+        
+        for downline in downlines:
+            # Escape username to ensure Markdown safety
+            username = html.escape(downline[1] if downline[1] else 'N/A')
+            table.add_row([downline[0], username])
+        
+        text = f"Your referrals:\n\n<pre>{table}</pre>"
+    else:
+        text = "You don't have any referrals yet."
+    
+    bot.send_message(message.chat.id, text, parse_mode="HTML")
+
+@bot.message_handler(commands=['view_referrals'])
+def view_referrals(message):
+    chat_id = message.chat.id
+    conn, c = get_connection()
+    c.execute("SELECT chat_id, username FROM referrals WHERE upline_id=?", (chat_id,))
     downlines = c.fetchall()
     conn.close()
 
     if downlines:
         text = "Your referrals:\n\n"
         for downline in downlines:
-            text += f"- Chat ID: {downline[0]}, Username: {downline[1] if downline[1] else 'N/A'}\n"
+            chat_id_str = str(downline[0])  # Ensure chat_id is converted to string
+            username = downline[1] if downline[1] else 'N/A'
+            # Escape Markdown characters in username
+            username_escaped = html.escape(username, quote=False)
+            text += f"Chat ID: {chat_id_str}, Username: {username_escaped}\n"
     else:
         text = "You don't have any referrals yet."
 
-    bot.send_message(chat_id, text, parse_mode="Markdown")
-
-@bot.message_handler(commands=['view_all_referrals'])
-def view_all_referrals(message):
-    conn, c = get_connection()
-    c.execute("SELECT chat_id, upline_id, username FROM referrals")
-    all_referrals = c.fetchall()
-    conn.close()
-
-    if all_referrals:
-        referrals_map = {}
-        for referral in all_referrals:
-            chat_id, upline_id, username = referral
-            if upline_id not in referrals_map:
-                referrals_map[upline_id] = []
-            referrals_map[upline_id].append((chat_id, username))
-
-        text = "All referrals:\n\n"
-        for upline_id, downlines in referrals_map.items():
-            downlines_text = ", ".join(f"{downline[0]} ({downline[1] if downline[1] else 'N/A'})" for downline in downlines)
-            text += f"Upline {upline_id}:\n"
-            text += f"```\n"
-            text += f"{downlines_text}\n"
-            text += f"```\n\n"
-    else:
-        text = "No referrals found."
-
+    # Send the message with Markdown parse_mode
     bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: True)
@@ -785,7 +787,7 @@ def echo_all(message):
     conn, c = get_connection()
     chat_id = message.chat.id
     
-    c.execute("SELECT * FROM referrals WHERE chat_d=?", (chat_id,))
+    c.execute("SELECT * FROM referrals WHERE chat_id=?", (chat_id,))
     data = c.fetchone()
     
     if not data :
