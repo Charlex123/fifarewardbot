@@ -318,19 +318,29 @@ def process_twitter_username(message):
 @bot.callback_query_handler(func=lambda call: call.data == 'MyReferrals')
 def request_email_address(call):
     chat_id = call.message.chat.id
+    keyboard = telebot.types.InlineKeyboardMarkup()
+    keyboard.add(
+        telebot.types.InlineKeyboardButton("Back To Tasks", callback_data='BackToTasks')
+    )
     conn, c = get_connection()
     c.execute("SELECT chat_id, username FROM referrals WHERE upline_id=?", (chat_id,))
     downlines = c.fetchall()
     conn.close()
 
     if downlines:
-        text = "Your referrals:\n\n"
+        table = PrettyTable()
+        table.field_names = ["Chat ID", "Username"]
+        
         for downline in downlines:
-            text += f"- Chat ID: {downline[0]}, Username: {downline[1] if downline[1] else 'N/A'}\n"
+            # Escape username to ensure Markdown safety
+            username = html.escape(downline[1] if downline[1] else 'N/A')
+            table.add_row([downline[0], username])
+        
+        text = f"Your referrals:\n\n<pre>{table}</pre>"
     else:
         text = "You don't have any referrals yet."
 
-    bot.send_message(chat_id, text, parse_mode="Markdown")
+    bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="Markdown")
         
 @bot.message_handler(commands=['download_csv'])
 def send_csv_options(message):
@@ -542,6 +552,10 @@ def start_command(message):
 @bot.message_handler(commands=['view_referrals'])
 def view_referrals(message):
     chat_id = message.chat.id
+    keyboard = telebot.types.InlineKeyboardMarkup()
+    keyboard.add(
+        telebot.types.InlineKeyboardButton("Back To Tasks", callback_data='BackToTasks')
+    )
     conn, c = get_connection()
     c.execute("SELECT chat_id, username FROM referrals WHERE upline_id=?", (chat_id,))
     downlines = c.fetchall()
@@ -560,7 +574,7 @@ def view_referrals(message):
     else:
         text = "You don't have any referrals yet."
     
-    bot.send_message(message.chat.id, text, parse_mode="HTML")
+    bot.send_message(message.chat.id, text, reply_markup=keyboard, parse_mode="HTML")
 
 @bot.message_handler(commands=['view_all_referrals'])
 def view_all_referrals(message):
