@@ -408,10 +408,10 @@ def start_command(message):
                     c.execute("SELECT telegram_username FROM telegramusernames WHERE chat_id = ?", (chat_id,))
                     twt_uname = c.fetchone()
                     if twt_uname is None:
-                        c.execute("INSERT INTO telegramusernames (chat_id, telegram_username, firstname) VALUES (?, ?)", (chat_id, username, firstname))
+                        c.execute("INSERT INTO telegramusernames (chat_id, telegram_username, firstname) VALUES (?, ?, ?)", (chat_id, username, firstname))
                         conn.commit()
                 else:
-                    c.execute("INSERT INTO telegramusernames (chat_id, telegram_username, firstname) VALUES (?, ?)", (chat_id, username, firstname))
+                    c.execute("INSERT INTO telegramusernames (chat_id, telegram_username, firstname) VALUES (?, ?, ?)", (chat_id, username, firstname))
                     conn.commit()
                     
                 c.execute("INSERT INTO referrals (chat_id, referral_link, count, upline_id, username) VALUES (?, ?, ?, ?, ?)",
@@ -523,6 +523,10 @@ def start_command(message):
                     parse_mode="Markdown"
                 )
     else:
+        keyboard.add(
+            telebot.types.InlineKeyboardButton("My Referrals", callback_data='MyReferrals'),
+            telebot.types.InlineKeyboardButton("Back To Tasks", callback_data='BackToTasks')
+        )
         text = str("Hi! " + message.from_user.first_name + "\n\n" +
                 "You must join using someone's referral link to participate in Fifareward airdrop.")
         
@@ -530,6 +534,7 @@ def start_command(message):
             message.chat.id,
             'https://www.fifareward.io/fifarewardlogo.png',
             caption=text,
+            reply_markup=keyboard,
             parse_mode="Markdown"
         )
                 
@@ -557,26 +562,31 @@ def view_referrals(message):
     
     bot.send_message(message.chat.id, text, parse_mode="HTML")
 
-@bot.message_handler(commands=['view_referrals'])
-def view_referrals(message):
-    chat_id = message.chat.id
+@bot.message_handler(commands=['view_all_referrals'])
+def view_all_referrals(message):
     conn, c = get_connection()
-    c.execute("SELECT chat_id, username FROM referrals WHERE upline_id=?", (chat_id,))
-    downlines = c.fetchall()
+    c.execute("SELECT chat_id, upline_id, username FROM referrals")
+    all_referrals = c.fetchall()
     conn.close()
 
-    if downlines:
-        text = "Your referrals:\n\n"
-        for downline in downlines:
-            chat_id_str = str(downline[0])  # Ensure chat_id is converted to string
-            username = downline[1] if downline[1] else 'N/A'
-            # Escape Markdown characters in username
-            username_escaped = html.escape(username, quote=False)
-            text += f"Chat ID: {chat_id_str}, Username: {username_escaped}\n"
-    else:
-        text = "You don't have any referrals yet."
+    if all_referrals:
+        referrals_map = {}
+        for referral in all_referrals:
+            chat_id, upline_id, username = referral
+            if upline_id not in referrals_map:
+                referrals_map[upline_id] = []
+            referrals_map[upline_id].append((chat_id, username))
 
-    # Send the message with Markdown parse_mode
+        text = "All referrals:\n\n"
+        for upline_id, downlines in referrals_map.items():
+            downlines_text = ", ".join(f"{downline[0]} ({downline[1] if downline[1] else 'N/A'})" for downline in downlines)
+            text += f"Upline {upline_id}:\n"
+            text += f"```\n"
+            text += f"{downlines_text}\n"
+            text += f"```\n\n"
+    else:
+        text = "No referrals found."
+
     bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: True)
